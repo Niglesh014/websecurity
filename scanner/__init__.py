@@ -13,15 +13,15 @@ from .modules import xss, sqli, headers, ssl_check, csrf, auth, error_disclosure
 
 # All modules with their display name and scan timeout
 MODULES = [
-    ("XSS",              xss,               6),
-    ("SQL Injection",    sqli,              8),
-    ("Security Headers", headers,           6),
-    ("SSL/TLS",          ssl_check,         8),
-    ("CSRF",             csrf,              6),
-    ("Authentication",   auth,             12),  # Needs multiple requests
-    ("Error Disclosure", error_disclosure,  6),
-    ("Secrets Exposure", secrets,          10),  # Checks many paths
-    ("eCommerce",        ecommerce,         6),
+    ("XSS",              xss,               4),
+    ("SQL Injection",    sqli,              5),
+    ("Security Headers", headers,           4),
+    ("SSL/TLS",          ssl_check,         6),
+    ("CSRF",             csrf,              4),
+    ("Authentication",   auth,             6),  # Needs multiple requests
+    ("Error Disclosure", error_disclosure,  4),
+    ("Secrets Exposure", secrets,          4),  # Checks many paths
+    ("eCommerce",        ecommerce,         4),
 ]
 
 SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4, "Error": 5}
@@ -46,7 +46,7 @@ def _run_module(name, module, url, timeout):
         }
 
 
-def scan(url: str, max_workers: int = 6) -> dict:
+def scan(url: str, max_workers: int = 3) -> dict:
     """
     Run all scanner modules concurrently and return a full report.
 

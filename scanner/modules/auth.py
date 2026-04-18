@@ -10,6 +10,7 @@ Checks for:
 import requests
 import time
 import re
+import concurrent.futures
 
 
 # Common login endpoint paths to test
@@ -44,24 +45,27 @@ def _find_login_endpoint(base_url: str, timeout: int) -> str | None:
 
 def _check_rate_limit(login_url: str, timeout: int) -> bool:
     """
-    Return True (vulnerable) if 10 rapid requests are all accepted without
+    Return True (vulnerable) if 5 rapid requests are all accepted without
     rate-limit responses (429 Too Many Requests / lockout message).
     """
-    blocked = False
-    for i in range(10):
+    session = requests.Session()
+    def _single_request(i):
         try:
-            resp = requests.post(
+            resp = session.post(
                 login_url,
                 json={"email": f"test{i}@test.com", "password": "wrongpassword123"},
                 headers={"Content-Type": "application/json"},
                 timeout=timeout,
                 allow_redirects=False,
             )
-            if resp.status_code == 429 or "too many" in resp.text.lower() or "rate limit" in resp.text.lower():
-                blocked = True
-                break
+            return resp.status_code == 429 or "too many" in resp.text.lower() or "rate limit" in resp.text.lower()
         except Exception:
-            break
+            return False
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(_single_request, i) for i in range(5)]
+        blocked = any(future.result() for future in concurrent.futures.as_completed(futures))
+
     return not blocked  # returns True if NOT blocked = vulnerable
 
 
@@ -70,14 +74,15 @@ def _check_user_enumeration(login_url: str, timeout: int) -> bool:
     Return True if the endpoint returns different error messages for
     wrong password vs. unknown user — enabling attacker to enumerate valid accounts.
     """
+    session = requests.Session()
     try:
-        resp_known = requests.post(
+        resp_known = session.post(
             login_url,
             json={"email": "admin@example.com", "password": "wrongpassword_xyz987"},
             headers={"Content-Type": "application/json"},
             timeout=timeout,
         )
-        resp_unknown = requests.post(
+        resp_unknown = session.post(
             login_url,
             json={"email": "definitely_not_real_xyz@example.com", "password": "wrongpassword_xyz987"},
             headers={"Content-Type": "application/json"},

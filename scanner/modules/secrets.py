@@ -10,6 +10,7 @@ Checks for:
 
 import requests
 import re
+import concurrent.futures
 
 
 # Regex patterns for common secret formats
@@ -33,17 +34,10 @@ SENSITIVE_PATHS = [
     "/.git/config",
     "/config.php",
     "/wp-config.php",
-    "/config/database.yml",
-    "/config/secrets.yml",
     "/backup.sql",
     "/dump.sql",
-    "/db.sql",
-    "/database.sql",
     "/.htpasswd",
     "/phpinfo.php",
-    "/info.php",
-    "/server-status",
-    "/robots.txt",  # Not a security risk alone, but reveals paths
 ]
 
 
@@ -64,10 +58,11 @@ def check(url: str, timeout: int = 6) -> dict:
     """
     issues = []
     affected_urls = []
+    session = requests.Session()
 
     # --- 1. Check main page source for secrets ---
     try:
-        resp = requests.get(url, timeout=timeout, allow_redirects=True)
+        resp = session.get(url, timeout=timeout, allow_redirects=True)
         leaked = _check_source_for_secrets(resp.text)
         if leaked:
             issues.append(f"Potential secrets in page source: {', '.join(leaked)}")
@@ -76,28 +71,35 @@ def check(url: str, timeout: int = 6) -> dict:
         pass
 
     # --- 2. Check for exposed sensitive files ---
-    for path in SENSITIVE_PATHS:
+    def _check_path(path):
         test_url = url + path
         try:
-            resp = requests.get(test_url, timeout=timeout, allow_redirects=False)
-            # 200 = file exists, ignore redirects to login pages
+            resp = session.get(test_url, timeout=timeout, allow_redirects=False)
             if resp.status_code == 200 and len(resp.text) > 50:
-                # Verify it's not a custom 404 disguised as 200
                 is_not_404 = not any(
                     phrase in resp.text.lower()
                     for phrase in ["page not found", "404", "not found", "does not exist"]
                 )
                 if is_not_404:
-                    issues.append(f"Sensitive file publicly accessible: {path}")
-                    affected_urls.append(test_url)
-
-                    # Extra check: scan .env content for secrets
+                    result = [f"Sensitive file publicly accessible: {path}", test_url]
                     if ".env" in path:
                         extra = _check_source_for_secrets(resp.text)
                         if extra:
-                            issues.append(f"  ↳ .env contains: {', '.join(extra)}")
+                            result.append(f"  ↳ .env contains: {', '.join(extra)}")
+                    return result
         except Exception:
             pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(_check_path, path) for path in SENSITIVE_PATHS]
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result:
+                issues.append(result[0])
+                affected_urls.append(result[1])
+                if len(result) > 2:
+                    issues.append(result[2])
 
     found = bool(issues)
 
