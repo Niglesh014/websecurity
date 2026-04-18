@@ -528,10 +528,19 @@ export default function SecuritySentinel() {
 
   const toggleOpt = (id) =>
     setSelectedOpts((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id]);
-
+   
+  const toggleExpanded = (id) => {
+  setExpanded(prev => ({
+    ...prev,
+    [id]: !prev[id]
+  }));
+};
 
 const startScan = async () => {
-  if (!url.trim()) return;
+  if (!url.trim() || !url.startsWith("http")) {
+  alert("Enter valid URL (include http/https)");
+  return;
+}
   setPhase("scanning");
   setLogLines([]);
   setProgress(0);
@@ -551,11 +560,16 @@ const startScan = async () => {
 
   try {
     // Call your real Flask backend
-    const res = await fetch("http://localhost:5000/scan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: url.trim() })
-    });
+   const API = "http://localhost:5000";
+
+const res = await fetch(`${API}/scan`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    url: url.trim(),
+    modules: selectedOpts
+  })
+});
 
     const data = await res.json();
     clearInterval(logInterval);
@@ -564,56 +578,37 @@ const startScan = async () => {
     setPhase("results");
     fetchAISummary(data.vulnerabilities);
 
-  } catch (err) {
-    clearInterval(logInterval);
-    alert("Could not connect to scanner backend. Is scanner.py running on port 5000?");
-    setPhase("idle");
-  }
+  } 
+    catch (err) {
+  console.error(err);
+  alert("Backend not running. Start Flask server on port 5000.");
+  setPhase("idle");
+}
 };
 
   const fetchAISummary = async (vulns) => {
   setAiLoading(true);
-  const list = vulns.length === 0
-    ? "No vulnerabilities found."
-    : vulns.map((v, i) => `${i + 1}. ${v.name} (${v.severity})`).join("\n");
 
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+    const res = await fetch("http://localhost:5000/ai-summary", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "anthropic-api-key": "YOUR_API_KEY_HERE",
-        "anthropic-dangerous-direct-browser-access": "true",
+        "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
-        messages: [{
-          role: "user",
-          content: `You are a friendly security advisor for a small business owner with no technical background.
-
-A real security scan of ${url} found these vulnerabilities:
-${list}
-
-Write 3-4 plain English sentences explaining the business risk.
-No bullet points. No jargon. Be honest but not alarmist.
-If no vulnerabilities, say the site looks safe and suggest monthly scans.`
-        }]
-      })
+      body: JSON.stringify({ vulnerabilities: vulns })
     });
+
     const data = await res.json();
-    const text = data.content?.find(b => b.type === "text")?.text || "";
+    const text = data.content?.[0]?.text || "No summary available";
+
     setAiSummary(text);
+
   } catch {
-    setAiSummary(
-      vulns.length === 0
-        ? "Great news — no major vulnerabilities were detected. Keep scanning monthly to stay safe."
-        : "Your site has security issues that need attention. Review the findings below and follow the fix roadmap."
-    );
+    setAiSummary("Could not generate AI summary.");
   }
+
   setAiLoading(false);
 };
-
   // REPLACE WITH THIS:
 const critCount = vulnerabilities.filter(v => v.severity === "critical").length;
 const highCount = vulnerabilities.filter(v => v.severity === "high").length;
@@ -784,7 +779,7 @@ const score = vulnerabilities.length === 0
             {/* VULNERABILITIES */}
             <h3 className="section-title">Detected Vulnerabilities ({vulnerabilities.length})</h3>
             <div className="vuln-list">
-              {vulnerabilities.map(v => (
+              {vulnerabilities?.map(v => (
                 <div key={v.id} className={`vuln-card ${expanded[v.id] ? "expanded" : ""}`}>
                   <div className="vuln-header" onClick={() => toggleExpanded(v.id)}>
                     <span className={`severity-badge sev-${v.severity}`}>{v.severity.toUpperCase()}</span>
