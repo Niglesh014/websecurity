@@ -537,9 +537,11 @@ export default function SecuritySentinel() {
 };
 
 const startScan = async () => {
-  if (!url.trim() || !url.startsWith("http")) {
-  alert("Enter valid URL (include http/https)");
-  return;
+let finalUrl = url.trim();
+
+// auto add https if missing
+if (!finalUrl.startsWith("http")) {
+  finalUrl = "https://" + finalUrl;
 }
   setPhase("scanning");
   setLogLines([]);
@@ -566,7 +568,7 @@ const res = await fetch(`${API}/scan`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
-    url: url.trim(),
+    url: finalUrl,
     modules: selectedOpts
   })
 });
