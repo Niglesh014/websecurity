@@ -1,105 +1,49 @@
-"""
-Error Disclosure Scanner Module
-Checks whether the application leaks stack traces, database errors,
-file paths, or framework version info in HTTP responses.
-
-Verbose error messages give attackers a free map of your infrastructure.
-"""
+"""Error Disclosure Scanner — fast version with fewer trigger paths."""
 
 import requests
 
-# Patterns that indicate verbose error leakage
-ERROR_SIGNATURES = [
-    # Stack traces
-    "traceback (most recent call last)",
-    "at object.<anonymous>",
-    "stack trace:",
-    "exception in thread",
-    "java.lang.",
-    "at com.",
-
-    # Database errors
-    "you have an error in your sql syntax",
-    "pg_query()",
-    "uncaught exception",
-    "sqlstate",
-    "db2 sql error",
-    "ora-",
-    "sqlite3",
-
-    # Framework/debug modes
-    "debug mode",
-    "werkzeug debugger",
-    "django traceback",
-    "laravel whoops",
-    "rails application trace",
-    "symfony exception",
-
-    # File paths
-    "/var/www/",
-    "/home/",
-    "c:\\inetpub",
-    "c:\\xampp",
-    "app/models/",
-    "views/errors/",
+ERROR_SIGS = [
+    "traceback (most recent call last)","werkzeug debugger","django traceback",
+    "laravel whoops","you have an error in your sql syntax","pg_query()",
+    "ora-","debug mode","/var/www/","c:\\inetpub","uncaught exception",
 ]
-
-# Paths that tend to trigger error states
-ERROR_TRIGGER_PATHS = [
-    "/nonexistent_page_xyz_abc",
-    "/?id=",
-    "/?page=../../../../etc/passwd",
-    "/api/nonexistent",
-    "/admin/nonexistent",
-]
+# Only 3 paths instead of 5
+TRIGGER_PATHS = ["/nonexistent_xyz_abc", "/?id=", "/api/nonexistent"]
 
 
-def check(url: str, timeout: int = 6) -> dict:
-    """
-    Check whether the app exposes verbose error messages in production.
+def _get(url, timeout):
+    return requests.get(url, timeout=(2, timeout), allow_redirects=True,
+                        headers={"User-Agent":"SecuritySentinel/3.0"})
 
-    Returns a structured result dict.
-    """
-    leaking_urls = []
-    leaked_patterns = []
 
-    for path in ERROR_TRIGGER_PATHS:
-        test_url = url + path
+def check(url: str, timeout: int = 4) -> dict:
+    leaking  = []
+    patterns = []
+
+    for path in TRIGGER_PATHS:
         try:
-            resp = requests.get(test_url, timeout=timeout, allow_redirects=True)
-            body_lower = resp.text.lower()
-
-            for sig in ERROR_SIGNATURES:
-                if sig in body_lower:
-                    leaking_urls.append(test_url)
-                    leaked_patterns.append(sig)
-                    break  # One match per URL is enough
+            resp = _get(url + path, timeout)
+            body = resp.text.lower()
+            for sig in ERROR_SIGS:
+                if sig in body:
+                    leaking.append(url + path)
+                    patterns.append(sig)
+                    break
         except Exception:
             pass
 
-    found = bool(leaking_urls)
-    unique_patterns = list(set(leaked_patterns))
-
+    found = bool(leaking)
     return {
-        "id": "ERR-001",
-        "name": "Verbose Error Messages / Debug Mode",
-        "severity": "Medium" if found else "Info",
-        "description": (
-            f"Verbose error messages detected on {len(leaking_urls)} URL(s). "
-            f"Leaked indicators: {', '.join(unique_patterns[:4])}. "
-            "This reveals your tech stack, file paths, and database structure — "
-            "giving attackers a free reconnaissance report."
-            if found else
-            "No verbose error messages or debug output detected."
-        ),
-        "affected_urls": list(set(leaking_urls)),
-        "leaked_patterns": unique_patterns,
-        "recommendation": (
-            "1. Set your framework to production mode (DEBUG=False in Django, NODE_ENV=production, etc.). "
-            "2. Return only generic error pages to users: '404 Not Found', '500 Server Error'. "
-            "3. Log full error details server-side with Sentry or similar — never expose to the client. "
-            "4. Disable default framework error pages in production."
-            if found else "No action required."
-        ),
-        "found": found,
+        "id":"ERR-001", "name":"Verbose Error Messages / Debug Mode",
+        "severity":"medium" if found else "info",
+        "description":(f"Verbose errors on {len(leaking)} URL(s). Leaked: {', '.join(set(patterns)[:3])}." if found else "No verbose error messages detected."),
+        "affected_urls":list(set(leaking)),
+        "leaked_patterns":list(set(patterns)),
+        "businessImpact":"Reveals tech stack, file paths, and database schema — giving attackers a free map of your infrastructure.",
+        "tech":"Stack traces and database errors exposed in production responses.",
+        "example":"ERROR: relation \"users_v2\"\nnot found at character 57\nFILE: /var/www/app/db.py",
+        "fix":"Disable debug mode; return generic error pages; log errors server-side with Sentry.",
+        "effort":"15 minutes",
+        "recommendation":"1. Set DEBUG=False / NODE_ENV=production.\n2. Show only generic 404/500 pages.\n3. Use Sentry for server-side error logging.",
+        "found":found,
     }

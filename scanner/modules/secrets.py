@@ -1,132 +1,108 @@
 """
-Sensitive Data Exposure Scanner Module
-Checks for:
-  - API keys or secrets accidentally exposed in HTML/JS source
-  - .env files publicly accessible
-  - Git repository metadata exposed (.git/config)
-  - AWS/cloud credential patterns in page source
-  - Sensitive file paths accessible (backup files, config dumps)
+Secrets Exposure Scanner — FAST version
+Key fixes:
+  - Reduced sensitive paths from 12 to 6 highest-signal paths
+  - connect_timeout=1.5, read_timeout=3 per path
+  - Hard 8s ceiling via threading.Timer
 """
 
 import requests
 import re
-import concurrent.futures
+import threading
 
-
-# Regex patterns for common secret formats
 SECRET_PATTERNS = [
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "AWS Access Key ID"),
-    (re.compile(r"(?i)api[_\-]?key\s*[:=]\s*['\"]?([a-zA-Z0-9\-_]{20,})"), "API Key"),
-    (re.compile(r"(?i)secret[_\-]?key\s*[:=]\s*['\"]?([a-zA-Z0-9\-_]{16,})"), "Secret Key"),
-    (re.compile(r"(?i)password\s*[:=]\s*['\"]([^'\"]{8,})['\"]"), "Hardcoded Password"),
-    (re.compile(r"(?i)db_password\s*[:=]\s*['\"]?([^\s'\"]{6,})"), "Database Password"),
-    (re.compile(r"eyJ[a-zA-Z0-9_\-]+\.eyJ[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+"), "JWT Token in source"),
-    (re.compile(r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"), "Private Key"),
-    (re.compile(r"(?i)stripe[_\-]?(?:secret|api)[_\-]?key\s*[:=]\s*['\"]?(sk_(?:live|test)_[a-zA-Z0-9]{20,})"), "Stripe Secret Key"),
-    (re.compile(r"AIza[0-9A-Za-z\-_]{35}"), "Google API Key"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"),                                                  "AWS Access Key ID"),
+    (re.compile(r"(?i)api[_\-]?key\s*[:=]\s*['\"]?([a-zA-Z0-9\-_]{20,})"),           "API Key"),
+    (re.compile(r"(?i)secret[_\-]?key\s*[:=]\s*['\"]?([a-zA-Z0-9\-_]{16,})"),        "Secret Key"),
+    (re.compile(r"(?i)password\s*[:=]\s*['\"]([^'\"]{8,})['\"]"),                     "Hardcoded Password"),
+    (re.compile(r"eyJ[a-zA-Z0-9_\-]+\.eyJ[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+"),        "JWT Token in source"),
+    (re.compile(r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"),                   "Private Key"),
+    (re.compile(r"AIza[0-9A-Za-z\-_]{35}"),                                            "Google API Key"),
+    (re.compile(r"sk_(?:live|test)_[a-zA-Z0-9]{20,}"),                                "Stripe Secret Key"),
 ]
 
-# Files that should never be publicly accessible
+# Only the 6 highest-signal paths
 SENSITIVE_PATHS = [
     "/.env",
-    "/.env.local",
-    "/.env.production",
     "/.git/config",
-    "/config.php",
     "/wp-config.php",
-    "/backup.sql",
-    "/dump.sql",
-    "/.htpasswd",
+    "/.env.local",
     "/phpinfo.php",
+    "/.htpasswd",
 ]
 
 
-def _check_source_for_secrets(text: str) -> list:
-    """Scan page source text for secret patterns. Returns list of finding strings."""
-    findings = []
-    for pattern, label in SECRET_PATTERNS:
-        if pattern.search(text):
-            findings.append(label)
-    return findings
+def _scan_source(text: str) -> list:
+    return [label for pattern, label in SECRET_PATTERNS if pattern.search(text)]
 
 
-def check(url: str, timeout: int = 6) -> dict:
-    """
-    Check for exposed secrets and sensitive files.
+def _get(url, connect_t=1.5, read_t=3):
+    return requests.get(url, timeout=(connect_t, read_t),
+                        allow_redirects=False,
+                        headers={"User-Agent":"SecuritySentinel/3.0"})
 
-    Returns a structured result dict.
-    """
-    issues = []
-    affected_urls = []
-    session = requests.Session()
 
-    # --- 1. Check main page source for secrets ---
-    try:
-        resp = session.get(url, timeout=timeout, allow_redirects=True)
-        leaked = _check_source_for_secrets(resp.text)
-        if leaked:
-            issues.append(f"Potential secrets in page source: {', '.join(leaked)}")
-            affected_urls.append(url)
-    except Exception:
-        pass
+def check(url: str, timeout: int = 4) -> dict:
+    result = {}
+    done   = threading.Event()
 
-    # --- 2. Check for exposed sensitive files ---
-    def _check_path(path):
-        test_url = url + path
+    def _inner():
+        issues  = []
+        affected = []
+
+        # Scan main page source
         try:
-            resp = session.get(test_url, timeout=timeout, allow_redirects=False)
-            if resp.status_code == 200 and len(resp.text) > 50:
-                is_not_404 = not any(
-                    phrase in resp.text.lower()
-                    for phrase in ["page not found", "404", "not found", "does not exist"]
-                )
-                if is_not_404:
-                    result = [f"Sensitive file publicly accessible: {path}", test_url]
-                    if ".env" in path:
-                        extra = _check_source_for_secrets(resp.text)
-                        if extra:
-                            result.append(f"  ↳ .env contains: {', '.join(extra)}")
-                    return result
+            resp = _get(url, 2, min(timeout, 4))
+            leaked = _scan_source(resp.text)
+            if leaked:
+                issues.append(f"Potential secrets in page source: {', '.join(leaked)}")
+                affected.append(url)
         except Exception:
             pass
-        return None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(_check_path, path) for path in SENSITIVE_PATHS]
-        for future in concurrent.futures.as_completed(futures):
-            result = future.result()
-            if result:
-                issues.append(result[0])
-                affected_urls.append(result[1])
-                if len(result) > 2:
-                    issues.append(result[2])
+        # Check sensitive paths
+        for path in SENSITIVE_PATHS:
+            try:
+                resp = _get(url + path, 1.5, 3)
+                if resp.status_code == 200 and len(resp.text) > 50:
+                    not_404 = not any(p in resp.text.lower() for p in ["page not found","404","not found"])
+                    if not_404:
+                        issues.append(f"Sensitive file accessible: {path}")
+                        affected.append(url + path)
+                        extra = _scan_source(resp.text)
+                        if extra:
+                            issues.append(f"  ↳ Contains: {', '.join(extra)}")
+            except Exception:
+                pass
 
-    found = bool(issues)
+        found = bool(issues)
+        has_secrets = any(any(s in i for s in ["AWS","API Key","Secret","Password","JWT","Private","Stripe"]) for i in issues)
+        severity = "critical" if has_secrets else ("high" if found else "info")
 
-    # Escalate severity if actual secrets (not just file paths) are found
-    secret_issues = [i for i in issues if any(
-        s in i for s in ["AWS", "API Key", "Secret Key", "Password", "JWT", "Private Key", "Stripe"]
-    )]
-    severity = "Critical" if secret_issues else ("High" if found else "Info")
+        result.update({
+            "id":"SECRETS-001", "name":"Sensitive Data & Secret Exposure",
+            "severity":severity,
+            "description":("\n".join(f"• {i}" for i in issues) if found else "No exposed secrets or sensitive files detected."),
+            "affected_urls":list(set(affected)),
+            "businessImpact":"Exposed API keys give attackers full access to your cloud services and databases within minutes.",
+            "tech":"Secrets hardcoded in source or .env files publicly accessible via direct URL.",
+            "example":"GET /.env HTTP/1.1\n→ DB_PASSWORD=supersecret\n   STRIPE_SECRET=sk_live_...",
+            "fix":"Move secrets to env vars. Block /.env, /.git in server config.",
+            "effort":"1–2 hours",
+            "recommendation":"1. Rotate any exposed keys immediately.\n2. Add .env* to .gitignore.\n3. Block sensitive paths in nginx/Apache.\n4. Scan commits with git-secrets.",
+            "found":found,
+        })
+        done.set()
 
-    return {
-        "id": "SECRETS-001",
-        "name": "Sensitive Data & Secret Exposure",
-        "severity": severity,
-        "description": (
-            f"{len(issues)} sensitive data issue(s) found:\n" + "\n".join(f"  • {i}" for i in issues)
-            if found else
-            "No exposed secrets or sensitive files detected."
-        ),
-        "affected_urls": list(set(affected_urls)),
-        "recommendation": (
-            "1. Move ALL secrets to environment variables — never hardcode in source. "
-            "2. Add .env, .env.*, .git/, config/ to .gitignore immediately. "
-            "3. Rotate any exposed API keys, passwords, or tokens right now. "
-            "4. Block access to sensitive paths in your server config (nginx/Apache deny rules). "
-            "5. Scan every commit with git-secrets or TruffleHog before pushing. "
-            "6. Audit Git history — secrets remain visible even after deletion."
-            if found else "No action required."
-        ),
-        "found": found,
-    }
+    t = threading.Thread(target=_inner, daemon=True)
+    t.start()
+    done.wait(timeout=8)
+
+    if not result:
+        return {
+            "id":"SECRETS-001","name":"Sensitive Data & Secret Exposure","severity":"info",
+            "description":"Secrets scan timed out.","affected_urls":[],"found":False,
+            "businessImpact":"","tech":"","example":"","fix":"","effort":"",
+            "recommendation":"Manually check for exposed .env files.",
+        }
+    return result
